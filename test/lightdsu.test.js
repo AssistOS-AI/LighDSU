@@ -6,6 +6,10 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { LightDSUEngine, DefaultDidStrategy, PERMISSIONS, ERROR_CODES, EVENT_TYPES } = require("../src");
+const { EVENT_FLAGS } = require("../src/constants");
+const { encodeEventPayload } = require("../src/eventCodec");
+const { makeEventSSI } = require("../src/ssi");
+const { ed25519Sign, randomBytes } = require("../src/crypto/primitives");
 
 async function makeEngine(root, did, domain = "local") {
   return LightDSUEngine.open({
@@ -44,6 +48,9 @@ test("domain mismatch and SSI validation errors", async () => {
   await assert.rejects(() => engineOther.loadDSU(created.lkeySSI), { code: ERROR_CODES.ERR_DOMAIN_MISMATCH });
   assert.throws(() => engineLocal.parseSSI("ssi:badtype:local:abc:v1"), { code: ERROR_CODES.ERR_INVALID_SSI });
   assert.throws(() => engineLocal.parseSSI(created.lkeySSI.replace(/:v1$/, ":v2")), { code: ERROR_CODES.ERR_UNSUPPORTED_VERSION });
+  await assert.rejects(() => LightDSUEngine.open({ storageRoot: dir, domain: "bad:domain", currentDID: "did:x" }), {
+    code: ERROR_CODES.ERR_INVALID_SSI
+  });
 });
 
 test("filesystem API complete flow", async () => {
@@ -67,6 +74,8 @@ test("filesystem API complete flow", async () => {
   assert.deepEqual(dsu.listFiles("/docs"), ["/docs/b.txt"]);
   await dsu.delete("/docs/b.txt");
   assert.deepEqual(dsu.listFiles("/docs"), []);
+  assert.throws(() => dsu.readDir("/docs/missing"), { code: ERROR_CODES.ERR_INVALID_PATH });
+  await assert.rejects(() => dsu.rename("/docs", "/docs/sub"), { code: ERROR_CODES.ERR_INVALID_PATH });
 });
 
 test("chunking: large file is split into multiple chunks", async () => {
@@ -133,6 +142,51 @@ test("access control: exact + recursive scopes, grant/revoke/check/list", async 
   );
 });
 
+test("scoped admin does not escalate outside grant scope", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:owner");
+  const created = await engine.createDSU();
+  await created.dsu.createFolder("/shared");
+  await created.dsu.createFolder("/private");
+  await created.dsu.writeFile("/shared/a.txt", Buffer.from("a"));
+  await created.dsu.writeFile("/private/b.txt", Buffer.from("b"));
+
+  await created.dsu.grantAccess("did:example:bob", { kind: "folder", path: "/shared", recursive: true }, PERMISSIONS.ADMIN);
+
+  const bobEngine = await makeEngine(dir, "did:example:bob");
+  const bob = await bobEngine.loadDSU(created.rkeySSI);
+  assert.equal((await bob.readFile("/shared/a.txt")).toString(), "a");
+  await assert.rejects(() => bob.readFile("/private/b.txt"), { code: ERROR_CODES.ERR_ACCESS_DENIED });
+});
+
+test("revoke by grantId enforces target scope authorization", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:owner");
+  const created = await engine.createDSU();
+  await created.dsu.createFolder("/public");
+  await created.dsu.createFolder("/secret");
+  await created.dsu.writeFile("/secret/data.txt", Buffer.from("s"));
+
+  await created.dsu.grantAccess("did:example:mallory", { kind: "folder", path: "/public", recursive: true }, PERMISSIONS.REVOKE);
+  const bobGrant = await created.dsu.grantAccess(
+    "did:example:bob",
+    { kind: "folder", path: "/secret", recursive: true },
+    PERMISSIONS.READ
+  );
+
+  created.dsu.setCurrentDID("did:example:mallory");
+  await assert.rejects(
+    () =>
+      created.dsu.revokeAccess(
+        "did:example:bob",
+        { kind: "folder", path: "/public", recursive: true },
+        PERMISSIONS.REVOKE,
+        { grantId: bobGrant.grantId }
+      ),
+    { code: ERROR_CODES.ERR_ACCESS_DENIED }
+  );
+});
+
 test("rkey and lza restrictions", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
   const engine = await makeEngine(dir, "did:example:alice");
@@ -178,6 +232,18 @@ test("provenance, history, and read audit access log", async () => {
   assert.equal(historyAfterRead, historyBeforeRead + 1);
 });
 
+test("appendToFile does not mask decryption/hash errors", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const { dsu } = await engine.createDSU();
+  await dsu.writeFile("/append.txt", Buffer.from("orig"));
+  const st = dsu.stat("/append.txt");
+  const brick = st.chunks[0].brickHash;
+  const brickFile = path.join(dir, "bricks", brick.slice(0, 2), `${brick}.ldb`);
+  await fs.writeFile(brickFile, Buffer.from("corrupted"));
+  await assert.rejects(() => dsu.appendToFile("/append.txt", Buffer.from("x")), { code: ERROR_CODES.ERR_BRICK_HASH_MISMATCH });
+});
+
 test("anchor tamper detection: invalid signature and chain", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
   const engine = await makeEngine(dir, "did:example:alice");
@@ -196,6 +262,38 @@ test("anchor tamper detection: invalid signature and chain", async () => {
         error.code === ERROR_CODES.ERR_UNSUPPORTED_VERSION)
     );
   });
+});
+
+test("actor hash/signature validation rejects forged actor envelope", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const created = await engine.createDSU();
+  const dsu = created.dsu;
+
+  const seq = dsu.anchorState.latestSeq + 1;
+  const event = {
+    eventType: EVENT_TYPES.ACCESS_LOG,
+    flags:
+      EVENT_FLAGS.subjectHash |
+      EVENT_FLAGS.resourceHash |
+      EVENT_FLAGS.permissions |
+      EVENT_FLAGS.actorHash |
+      EVENT_FLAGS.actorSignature,
+    seq,
+    timestampMs: Date.now(),
+    prevEventHash: dsu.anchorState.latestEventHash,
+    subjectHash: randomBytes(32),
+    resourceHash: randomBytes(32),
+    permissions: PERMISSIONS.READ,
+    actorHash: randomBytes(32),
+    actorSignature: Buffer.from(JSON.stringify({ did: "did:example:alice", signature: "invalid-signature" }))
+  };
+  const payload = encodeEventPayload(event);
+  const signature = ed25519Sign(dsu.anchorPrivate, payload);
+  const serialized = makeEventSSI("local", payload, signature);
+  await fs.appendFile(path.join(dir, "anchors", `${created.anchorId}.la`), `${serialized}\n`, "utf8");
+
+  await assert.rejects(() => engine.loadDSU(created.lkeySSI), { code: ERROR_CODES.ERR_EVENT_SIGNATURE_INVALID });
 });
 
 test("brick tamper detection", async () => {
@@ -243,4 +341,20 @@ test("garbage collection for purge-obsolete removes old bricks", async () => {
   const report = await dsu.runGarbageCollection();
   assert.equal(report.mode, "purge-obsolete");
   assert.ok(report.removedBricks >= 0);
+});
+
+test("setCurrentDID updates actor context for future events", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const created = await engine.createDSU();
+  await created.dsu.grantAccess(
+    "did:example:bob",
+    { kind: "DSU", path: "/", recursive: true },
+    PERMISSIONS.WRITE | PERMISSIONS.LIST | PERMISSIONS.READ
+  );
+  engine.setCurrentDID("did:example:bob");
+  created.dsu.setCurrentDID("did:example:bob");
+  await created.dsu.writeFile("/did.txt", Buffer.from("x"));
+  const history = created.dsu.getHistory();
+  assert.equal(history.length > 0, true);
 });

@@ -94,6 +94,7 @@ Semnături:
 - `createDSU`
 - `loadDSU`
 - `parseSSI`
+- `setCurrentDID`
 - `close`
 
 ### Mounted DSU
@@ -101,6 +102,7 @@ Semnături:
 - batch: `beginBatch`, `commitBatch`, `cancelBatch`, `hasUncommittedChanges`
 - access: `grantAccess`, `revokeAccess`, `checkAccess`, `listAccess`
 - provenance/history: `appendProvenance`, `getProvenance`, `getHistory`
+- actor context: `setCurrentDID`, `verifyAnchor`, `getLatestEventHash`
 
 ## 8. Reguli operaționale
 
@@ -127,3 +129,11 @@ Semnături:
 - `ERR_CONCURRENT_COMMIT`
 - `ERR_INVALID_PATH`
 - `ERR_INVALID_PERMISSION`
+
+## 10. Decizii de securitate operațională (implementate)
+
+- `ADMIN` respectă scope-ul grantului (nu este global implicit).
+- `grantId` este unic per grant (`eventHash`), iar `REVOKE` fără `grantId` operează pe tuple active.
+- `REVOKE` cu `grantId` validează dreptul de revocare pe scope-ul grantului țintit.
+- Operațiile FS validează strict existența/tipul path-urilor.
+- Verificarea ancorei include semnături actor + anchor și consistența lanțului (`seq`, `prevEventHash`).

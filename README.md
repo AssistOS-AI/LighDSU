@@ -8,6 +8,7 @@ LightDSU este o librărie locală pentru DSU-uri criptate, cu:
 - **access + audit + provenance**: pe bază de EventSSI
 
 Specificația tehnică self-contained: [`docs/lightdsu-v1-spec.md`](docs/lightdsu-v1-spec.md)
+Review de securitate și decizii de hardening: [`docs/security-review.md`](docs/security-review.md)
 
 ## Instalare
 
@@ -64,6 +65,7 @@ const data = await dsu.readFile("/docs/a.txt");
 - `engine.createDSU() -> { dsu, lkeySSI, rkeySSI, lzaSSI, anchorId }`
 - `engine.loadDSU(keySSI) -> MountedLightDSU`
 - `engine.parseSSI(serializedSSI) -> ParsedSSI`
+- `engine.setCurrentDID(did) -> void`
 - `engine.close()`
 
 ### Filesystem API
@@ -91,6 +93,7 @@ const data = await dsu.readFile("/docs/a.txt");
 - `appendProvenance(resource, payload, options?)`
 - `getProvenance()`
 - `getHistory(query?)`
+- `setCurrentDID(did)`
 
 ## Implementare v1 (esențial)
 
