@@ -1,0 +1,21 @@
+{
+  "name": "lighdsu",
+  "version": "1.0.0",
+  "description": "LightDSU v1 local encrypted DSU engine",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AssistOS-AI/LighDSU.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/AssistOS-AI/LighDSU/issues"
+  },
+  "homepage": "https://github.com/AssistOS-AI/LighDSU#readme"
+}
