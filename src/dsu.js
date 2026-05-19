@@ -5,7 +5,7 @@ const { EVENT_TYPES, EVENT_FLAGS, PERMISSIONS, policyAuditMode, AUDIT_MODE, DEFA
 const { normalizePath } = require("./utils");
 const { encodeEventPayload } = require("./eventCodec");
 const { makeEventSSI } = require("./ssi");
-const { aes256gcmEncrypt, aes256gcmDecrypt, randomBytes, ed25519Sign } = require("./crypto/primitives");
+const { aes256gcmEncrypt, aes256gcmDecrypt, sha256, randomBytes, ed25519Sign } = require("./crypto/primitives");
 const { writeBrick, readBrick, listBrickHashes, removeBrick } = require("./storage");
 const {
   serializeBrickMap,
@@ -33,6 +33,8 @@ const {
 } = require("./access");
 const { appendEvent, readAndVerifyAnchor, reduceAnchorState } = require("./anchor");
 const { encodeActorMessage } = require("./actorMessage");
+const { encodeProvenancePayload, decodeProvenancePayload, buildProvenancePayloadV1 } = require("./provenancePayloadCodec");
+const { getProfile, listProfiles, validateStructural } = require("./provenanceProfiles");
 
 class MountedLightDSU {
   constructor(options) {
@@ -413,18 +415,45 @@ class MountedLightDSU {
     }));
   }
 
-  async appendProvenance(resource, payload, options = {}) {
+  async appendProvenance(resource, provenanceInput, options = {}) {
     this.#assertWritable();
     this.#checkCurrentAccess(resource, PERMISSIONS.PROVENANCE_APPEND);
-    const plain = Buffer.isBuffer(payload) ? payload : Buffer.from(JSON.stringify(payload));
+
+    const { profileId, profileVersion, payloadFormat, canonicalPayload, externalReferences, versionSeq } = provenanceInput;
+    if (!profileId) throwError(ERROR_CODES.ERR_INVALID_PROVENANCE_PROFILE, "profileId is required");
+
+    const profile = getProfile(profileId);
+    if (!profile) throwError(ERROR_CODES.ERR_UNSUPPORTED_PROFILE, `Unknown profileId: 0x${profileId.toString(16)}`);
+
+    const cpBuf = Buffer.isBuffer(canonicalPayload)
+      ? canonicalPayload
+      : Buffer.from(typeof canonicalPayload === "object" ? JSON.stringify(canonicalPayload) : String(canonicalPayload));
+
+    const resourceHashHex = resource?.path || resource?.kind
+      ? hashResource(this.accessIndexKey, normalizeScope(resource)).toString("hex")
+      : null;
+
+    const v1 = buildProvenancePayloadV1({
+      profileId,
+      profileVersion: profileVersion || profile.version,
+      payloadFormat:  payloadFormat || profile.payloadFormats[0],
+      canonicalPayload: cpBuf,
+      resourceHash: resourceHashHex ? Buffer.from(resourceHashHex, "hex") : null,
+      versionSeq:   versionSeq != null ? versionSeq : null,
+      externalReferences: externalReferences || null
+    });
+
+    const plain = encodeProvenancePayload(v1);
     const encrypted = aes256gcmEncrypt(this.brickMapKey, plain, Buffer.from("provenance"));
     const envelope = Buffer.concat([encrypted.nonce, encrypted.ciphertext, encrypted.tag]);
     const payloadHashHex = await writeBrick(this.storageRoot, envelope);
+
     const fields = {
       eventType: EVENT_TYPES.PROVENANCE,
-      flags: EVENT_FLAGS.payloadHash | EVENT_FLAGS.actorHash | EVENT_FLAGS.actorSignature | EVENT_FLAGS.extension,
-      payloadHash: Buffer.from(payloadHashHex, "hex")
+      flags: EVENT_FLAGS.payloadHash | EVENT_FLAGS.actorHash | EVENT_FLAGS.actorSignature
     };
+    fields.payloadHash = Buffer.from(payloadHashHex, "hex");
+
     const extensionData = {};
     if (resource?.path || resource?.kind) {
       const normalizedResource = normalizeScope(resource);
@@ -432,12 +461,22 @@ class MountedLightDSU {
       fields.resourceHash = hashResource(this.accessIndexKey, normalizedResource);
       extensionData.scope = scopeToJSON(normalizedResource);
     }
-    fields.extension = makeExtensionPayload(extensionData);
+    if (Object.keys(extensionData).length > 0) {
+      fields.flags |= EVENT_FLAGS.extension;
+      fields.extension = makeExtensionPayload(extensionData);
+    }
+
     const event = await this.#recordEvent(fields);
     if (options.attachToCommit) {
       await this.#commitVersion(Buffer.from(payloadHashHex, "hex"));
     }
-    return { seq: event.seq, payloadHash: payloadHashHex };
+    return {
+      seq:                    event.seq,
+      payloadHash:            payloadHashHex,
+      canonicalPayloadHash:   v1.canonicalPayloadHash.toString("hex"),
+      profileId,
+      profileName:            profile.name
+    };
   }
 
   getHistory(query = {}) {
@@ -458,29 +497,146 @@ class MountedLightDSU {
     const records = [];
     for (const event of this.events) {
       if (event.eventType !== EVENT_TYPES.PROVENANCE || !event.payloadHash) continue;
-      const payloadHash = event.payloadHash.toString("hex");
-      const envelope = await readBrick(this.storageRoot, payloadHash);
+      const payloadHashHex = event.payloadHash.toString("hex");
+      const envelope = await readBrick(this.storageRoot, payloadHashHex);
       const nonce = envelope.subarray(0, 12);
       const tag = envelope.subarray(envelope.length - 16);
       const ciphertext = envelope.subarray(12, envelope.length - 16);
       const plain = aes256gcmDecrypt(this.brickMapKey, nonce, ciphertext, tag, Buffer.from("provenance"));
-      let payload;
+
+      let v1;
       try {
-        payload = JSON.parse(plain.toString("utf8"));
+        v1 = decodeProvenancePayload(plain);
       } catch {
-        payload = plain;
+        // Legacy payloads stored before ProvenancePayloadV1 – return raw
+        records.push({ seq: event.seq, payloadHash: payloadHashHex, legacy: true });
+        continue;
       }
+
+      const profile = getProfile(v1.profileId);
       records.push({
-        seq: event.seq,
-        payloadHash,
-        resourceHash: event.resourceHash?.toString("hex"),
-        payload
+        seq:                  event.seq,
+        payloadHash:          payloadHashHex,
+        profileId:            v1.profileId,
+        profileName:          profile?.name || "UNKNOWN",
+        profileVersion:       v1.profileVersion,
+        payloadFormat:        v1.payloadFormat,
+        createdAt:            v1.createdAt,
+        canonicalPayloadHash: v1.canonicalPayloadHash,
+        resourceHash:         v1.resourceHash,
+        versionSeq:           v1.versionSeq,
+        canonicalPayload:     v1.canonicalPayload,
+        externalReferences:   v1.externalReferences
       });
     }
+
     let out = records;
-    if (query.payloadHash) out = out.filter((item) => item.payloadHash === query.payloadHash);
-    if (query.resourceHash) out = out.filter((item) => item.resourceHash === query.resourceHash);
+    if (query.payloadHash)  out = out.filter((r) => r.payloadHash === query.payloadHash);
+    if (query.resourceHash) out = out.filter((r) => r.resourceHash === query.resourceHash);
+    if (query.profileId)    out = out.filter((r) => r.profileId === query.profileId);
     return out;
+  }
+
+  async validateProvenance(resourceOrVersion, options = {}) {
+    const records = await this.getProvenance({
+      resourceHash: resourceOrVersion?.resourceHash,
+      profileId:    resourceOrVersion?.profileId
+    });
+
+    const report = {
+      valid: true,
+      totalRecords: records.length,
+      results: []
+    };
+
+    for (const rec of records) {
+      if (rec.legacy) {
+        report.results.push({ seq: rec.seq, payloadHash: rec.payloadHash, valid: false, level: "structural", errors: ["legacy payload – not ProvenancePayloadV1"] });
+        report.valid = false;
+        continue;
+      }
+
+      const result = { seq: rec.seq, payloadHash: rec.payloadHash, valid: true, errors: [], level: null };
+
+      // Level 1: cryptographic – verify canonicalPayloadHash
+      const cpBuf = Buffer.isBuffer(rec.canonicalPayload) ? rec.canonicalPayload : Buffer.from(rec.canonicalPayload);
+      const recomputed = sha256(cpBuf).toString("hex");
+      if (recomputed !== rec.canonicalPayloadHash) {
+        result.valid = false;
+        result.level = "cryptographic";
+        result.errors.push("canonicalPayloadHash mismatch – payload content corrupted");
+      }
+
+      // Level 2+3: structural + domain
+      if (result.valid || options.continueOnCryptoError) {
+        const profile = getProfile(rec.profileId);
+        if (!profile) {
+          result.valid = false;
+          result.level = "structural";
+          result.errors.push(`unknown profileId: 0x${rec.profileId?.toString(16).padStart(4, "0")}`);
+        } else {
+          const v1 = {
+            profileId:      rec.profileId,
+            profileVersion: rec.profileVersion,
+            payloadFormat:  rec.payloadFormat,
+            canonicalPayload: cpBuf
+          };
+          const errs = validateStructural(v1);
+          if (errs.length > 0) {
+            result.valid = false;
+            result.level = result.level || "structural";
+            result.errors.push(...errs);
+          }
+        }
+      }
+
+      if (!result.valid) report.valid = false;
+      report.results.push(result);
+    }
+
+    return report;
+  }
+
+  listProvenanceProfiles() {
+    return listProfiles();
+  }
+
+  getProvenancePolicy() {
+    return JSON.parse(JSON.stringify(
+      this.brickMap?.manifest?.provenancePolicy || {
+        requiredProfiles: [],
+        operationProfileMap: {},
+        regulatedMode: { gxp: false, glp: false, healthcare: false },
+        minimumPayloadFields: {},
+        auditMode: "no-read-audit"
+      }
+    ));
+  }
+
+  async updateProvenancePolicy(policyUpdate, options = {}) {
+    this.#assertWritable();
+    this.#checkCurrentAccess({ kind: "DSU", path: "/" }, PERMISSIONS.ADMIN);
+
+    if (!this.brickMap.manifest) this.brickMap.manifest = {};
+    if (!this.brickMap.manifest.provenancePolicy) this.brickMap.manifest.provenancePolicy = {};
+
+    const policy = this.brickMap.manifest.provenancePolicy;
+    if (policyUpdate.requiredProfiles !== undefined)    policy.requiredProfiles    = policyUpdate.requiredProfiles;
+    if (policyUpdate.operationProfileMap !== undefined) policy.operationProfileMap = policyUpdate.operationProfileMap;
+    if (policyUpdate.regulatedMode !== undefined)       Object.assign(policy.regulatedMode || (policy.regulatedMode = {}), policyUpdate.regulatedMode);
+    if (policyUpdate.minimumPayloadFields !== undefined) policy.minimumPayloadFields = policyUpdate.minimumPayloadFields;
+    if (policyUpdate.auditMode !== undefined)           policy.auditMode = policyUpdate.auditMode;
+
+    this.dirty = true;
+    const fields = {
+      eventType: EVENT_TYPES.POLICY_UPDATE,
+      flags: EVENT_FLAGS.actorHash | EVENT_FLAGS.actorSignature | EVENT_FLAGS.extension,
+      extension: makeExtensionPayload({ policyTarget: "provenancePolicy" })
+    };
+    const event = await this.#recordEvent(fields);
+    await this.#commitVersion();
+
+    return { seq: event.seq, policy: this.getProvenancePolicy() };
   }
 
   async verifyAnchor() {

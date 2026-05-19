@@ -216,15 +216,30 @@ test("provenance, history, and read audit access log", async () => {
   const { dsu } = await engine.createDSU();
   await dsu.writeFile("/p.txt", Buffer.from("payload"));
 
+  const { PROVENANCE_PROFILES, PAYLOAD_FORMAT } = require("../src/constants");
   const provenanceResult = await dsu.appendProvenance(
     { kind: "file", path: "/p.txt", recursive: false },
-    { source: "lab", method: "pipeline-v1", operation: "analysis" }
+    {
+      profileId: PROVENANCE_PROFILES.LIGHTDSU_MINIMAL,
+      payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
+      canonicalPayload: JSON.stringify({
+        eventKind: "ANALYZE",
+        operation: "analysis",
+        actorHash: "did:example:alice",
+        timestampMs: Date.now(),
+        method: "pipeline-v1",
+        softwareAgent: "test",
+        softwareVersion: "1.0"
+      })
+    }
   );
   assert.ok(provenanceResult.payloadHash);
+  assert.ok(provenanceResult.canonicalPayloadHash);
+  assert.equal(provenanceResult.profileName, "LIGHTDSU_MINIMAL");
 
   const records = await dsu.getProvenance();
   assert.equal(records.length, 1);
-  assert.equal(records[0].payload.source, "lab");
+  assert.equal(records[0].profileName, "LIGHTDSU_MINIMAL");
 
   const historyBeforeRead = dsu.getHistory({ eventType: EVENT_TYPES.ACCESS_LOG }).length;
   await dsu.readFile("/p.txt", { audit: true });

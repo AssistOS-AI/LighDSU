@@ -12,7 +12,18 @@ function createEmptyBrickMap() {
     manifest: {
       retentionMode: "keep-all",
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      provenancePolicy: {
+        requiredProfiles: [],
+        operationProfileMap: {},
+        regulatedMode: {
+          gxp: false,
+          glp: false,
+          healthcare: false
+        },
+        minimumPayloadFields: {},
+        auditMode: "no-read-audit"
+      }
     },
     metadata: {},
     entries: {

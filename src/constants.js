@@ -74,6 +74,43 @@ const AUDIT_MODE = {
 
 const DEFAULT_CHUNK_SIZE = 256 * 1024;
 
+const PROVENANCE_PROFILES = {
+  LIGHTDSU_MINIMAL:        0x0001,
+  W3C_PROV:                0x0002,
+  FHIR_PROVENANCE:         0x0003,
+  FHIR_AUDIT_EVENT:        0x0004,
+  GXP_AUDIT_TRAIL:         0x0005,
+  RO_CRATE:                0x0006,
+  GA4GH_DATA_USE:          0x0007,
+  ISO_8000_PROVENANCE:     0x0008,
+  OECD_GLP_DATA_INTEGRITY: 0x0009,
+  AI_ML_EXPERIMENT:        0x000a
+};
+
+const PAYLOAD_FORMAT = {
+  CBOR:           0x01,
+  CANONICAL_JSON: 0x02,
+  JSON_LD:        0x03,
+  RDF_TURTLE:     0x04,
+  FHIR_JSON:      0x05,
+  BINARY:         0x06
+};
+
+const PROVENANCE_EVENT_KIND = {
+  CREATE:    "CREATE",
+  UPDATE:    "UPDATE",
+  DELETE:    "DELETE",
+  IMPORT:    "IMPORT",
+  EXPORT:    "EXPORT",
+  TRANSFORM: "TRANSFORM",
+  ANALYZE:   "ANALYZE",
+  DERIVE:    "DERIVE",
+  SHARE:     "SHARE",
+  REVIEW:    "REVIEW",
+  APPROVE:   "APPROVE",
+  REJECT:    "REJECT"
+};
+
 function hasPermission(actual, required) {
   return (actual & required) === required;
 }
@@ -108,6 +145,9 @@ module.exports = {
   RETENTION_MODE,
   AUDIT_MODE,
   DEFAULT_CHUNK_SIZE,
+  PROVENANCE_PROFILES,
+  PAYLOAD_FORMAT,
+  PROVENANCE_EVENT_KIND,
   hasPermission,
   makePolicyWord,
   policyAuditMode

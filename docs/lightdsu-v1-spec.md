@@ -137,3 +137,79 @@ Semnături:
 - `REVOKE` cu `grantId` validează dreptul de revocare pe scope-ul grantului țintit.
 - Operațiile FS validează strict existența/tipul path-urilor.
 - Verificarea ancorei include semnături actor + anchor și consistența lanțului (`seq`, `prevEventHash`).
+
+---
+
+## Provenance Profiles Extension
+
+### ProvenancePayloadV1
+
+Every provenance event stores an encrypted `ProvenancePayloadV1` brick. The outer struct carries:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `profileId` | u16 | One of the 10 defined profile IDs |
+| `profileVersion` | u16 | Profile version supported by this payload |
+| `payloadFormat` | u8 | 0x01 CBOR / 0x02 JSON / 0x03 JSON-LD / 0x04 RDF/Turtle / 0x05 FHIR JSON / 0x06 binary |
+| `createdAt` | u48 ms | Timestamp |
+| `resourceHash` | bytes32? | Optional — HMAC of the referenced resource |
+| `versionSeq` | uvarint? | Optional DSU version number |
+| `canonicalPayloadHash` | bytes32 | SHA-256 of the raw `canonicalPayload` (inner integrity check) |
+| `canonicalPayload` | bytes | Profile-specific data |
+| `externalReferences` | list? | `{ type, ref, hash }` entries for external artefacts |
+
+Double-hash invariant: `canonicalPayloadHash = SHA256(canonicalPayload)` and the EventSSI `payloadHash = SHA256(encryptedBrickEnvelope)`.
+
+### Profile IDs
+
+| ID | Name | Standard |
+|----|------|---------|
+| 0x0001 | LIGHTDSU_MINIMAL | Native LightDSU minimal audit |
+| 0x0002 | W3C_PROV | W3C PROV-O |
+| 0x0003 | FHIR_PROVENANCE | HL7 FHIR Provenance |
+| 0x0004 | FHIR_AUDIT_EVENT | HL7 FHIR AuditEvent |
+| 0x0005 | GXP_AUDIT_TRAIL | FDA 21 CFR Part 11 / EU GMP Annex 11 |
+| 0x0006 | RO_CRATE | RO-Crate 1.2 |
+| 0x0007 | GA4GH_DATA_USE | GA4GH DUO |
+| 0x0008 | ISO_8000_PROVENANCE | ISO 8000-120 master data provenance |
+| 0x0009 | OECD_GLP_DATA_INTEGRITY | OECD GLP Data Integrity |
+| 0x000A | AI_ML_EXPERIMENT | Native LightDSU ML experiment provenance |
+
+### New DSU APIs
+
+```js
+// Append provenance (profile-aware)
+dsu.appendProvenance(resource, {
+  profileId,           // PROVENANCE_PROFILES constant
+  profileVersion?,     // defaults to profile.version
+  payloadFormat?,      // defaults to profile.payloadFormats[0]
+  canonicalPayload,    // Buffer or JSON-serialisable object
+  externalReferences?, // [{ type, ref, hash }]
+  versionSeq?
+}) -> { seq, payloadHash, canonicalPayloadHash, profileId, profileName }
+
+// Retrieve and decode provenance records
+dsu.getProvenance({ payloadHash?, resourceHash?, profileId? }) -> ProvenanceRecord[]
+
+// 3-level validation: cryptographic → structural → domain
+dsu.validateProvenance(query?, options?) -> ProvenanceValidationReport
+
+// Enumerate supported profiles
+dsu.listProvenanceProfiles() -> ProvenanceProfileDescriptor[]
+
+// Policy management
+dsu.getProvenancePolicy() -> ProvenancePolicy
+dsu.updateProvenancePolicy(policyUpdate, options?) -> { seq, policy }
+```
+
+### Manifest provenancePolicy
+
+```json
+{
+  "requiredProfiles": [],
+  "operationProfileMap": {},
+  "regulatedMode": { "gxp": false, "glp": false, "healthcare": false },
+  "minimumPayloadFields": {},
+  "auditMode": "no-read-audit"
+}
+```
