@@ -27,6 +27,7 @@
 const { sha256 } = require("./crypto/primitives");
 const { encodeUVarint, decodeUVarint } = require("./eventCodec");
 const { throwError, ERROR_CODES } = require("./errors");
+const { canonicalJSONStringify } = require("./utils");
 
 const PROV_VERSION_TAG = 0x01; // v1
 
@@ -186,7 +187,7 @@ function buildProvenancePayloadV1(input) {
   const cpBuf = Buffer.isBuffer(input.canonicalPayload)
     ? input.canonicalPayload
     : Buffer.from(typeof input.canonicalPayload === "object"
-        ? JSON.stringify(input.canonicalPayload)
+        ? canonicalJSONStringify(input.canonicalPayload)
         : String(input.canonicalPayload));
 
   const canonicalPayloadHash = sha256(cpBuf);

@@ -2,7 +2,7 @@
 
 const { ERROR_CODES, throwError } = require("./errors");
 const { EVENT_TYPES, EVENT_FLAGS, PERMISSIONS, policyAuditMode, AUDIT_MODE, DEFAULT_CHUNK_SIZE } = require("./constants");
-const { normalizePath } = require("./utils");
+const { normalizePath, canonicalJSONStringify } = require("./utils");
 const { encodeEventPayload } = require("./eventCodec");
 const { makeEventSSI } = require("./ssi");
 const { aes256gcmEncrypt, aes256gcmDecrypt, sha256, randomBytes, ed25519Sign } = require("./crypto/primitives");
@@ -36,11 +36,51 @@ const { encodeActorMessage } = require("./actorMessage");
 const { encodeProvenancePayload, decodeProvenancePayload, buildProvenancePayloadV1 } = require("./provenancePayloadCodec");
 const { getProfile, listProfiles, validateStructural } = require("./provenanceProfiles");
 
+function cloneJSON(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function valuesEqual(left, right) {
+  if (left === undefined && right === undefined) return true;
+  return canonicalJSONStringify(left) === canonicalJSONStringify(right);
+}
+
+function replayLocalChanges(baseValue, workingValue, latestValue) {
+  if (valuesEqual(baseValue, workingValue)) {
+    return cloneJSON(latestValue);
+  }
+  if (!isPlainObject(baseValue) || !isPlainObject(workingValue) || !isPlainObject(latestValue)) {
+    return cloneJSON(workingValue);
+  }
+
+  const result = cloneJSON(latestValue) || {};
+  const keys = new Set([
+    ...Object.keys(baseValue || {}),
+    ...Object.keys(workingValue || {})
+  ]);
+
+  for (const key of keys) {
+    if (!(key in workingValue)) {
+      delete result[key];
+      continue;
+    }
+    result[key] = replayLocalChanges(baseValue?.[key], workingValue[key], latestValue?.[key]);
+  }
+
+  return result;
+}
+
 class MountedLightDSU {
   constructor(options) {
     Object.assign(this, options);
     this.isBatchMode = false;
     this.dirty = false;
+    this.baseBrickMap = this.brickMap ? cloneJSON(this.brickMap) : null;
   }
 
   #assertWritable() {
@@ -73,49 +113,81 @@ class MountedLightDSU {
     if (!allowed) throwError(ERROR_CODES.ERR_ACCESS_DENIED, "Access denied");
   }
 
+  async #refreshAnchorState() {
+    const events = await readAndVerifyAnchor(
+      this.storageRoot,
+      this.domain,
+      this.anchorIdHex,
+      this.anchorPublic,
+      this.didStrategy,
+      this.accessIndexKey
+    );
+    this.events = events;
+    this.anchorState = reduceAnchorState(events);
+    this.anchorState.accessIndexKey = this.accessIndexKey;
+    return events;
+  }
+
+  #prepareBrickMapForCommit() {
+    const nextBrickMap = cloneJSON(this.brickMap);
+    nextBrickMap.seq = (Number.isInteger(nextBrickMap.seq) ? nextBrickMap.seq : 0) + 1;
+    nextBrickMap.manifest = nextBrickMap.manifest || {};
+    nextBrickMap.manifest.updatedAt = Date.now();
+    return nextBrickMap;
+  }
+
+  async #rebaseBrickMapOntoLatest() {
+    await this.#refreshAnchorState();
+    const latestBrickMap = await MountedLightDSU.decryptBrickMap(
+      this.storageRoot,
+      this.anchorState.latestBrickMapHash,
+      this.brickMapKey
+    );
+    const rebased = replayLocalChanges(this.baseBrickMap || latestBrickMap, this.brickMap, latestBrickMap);
+    this.brickMap = rebased;
+  }
+
+  async #appendEventOnce(eventPayloadFields) {
+    this.#assertWritable();
+    const baseSeq = this.anchorState.latestSeq;
+    const basePrevHash = this.anchorState.latestEventHash;
+    const timestampMs = Date.now();
+    const seq = baseSeq + 1;
+    const event = {
+      seq,
+      timestampMs,
+      prevEventHash: basePrevHash,
+      ...eventPayloadFields
+    };
+    const actorMessage = encodeActorMessage(event);
+    if (event.flags & EVENT_FLAGS.actorSignature) {
+      event.actorSignature = Buffer.from(this.didStrategy.sign(actorMessage));
+    }
+    if (event.flags & EVENT_FLAGS.actorHash) {
+      event.actorHash = this.#currentActorHash();
+    }
+    const eventPayload = encodeEventPayload(event);
+    const anchorSignature = ed25519Sign(this.anchorPrivate, eventPayload);
+    const serialized = makeEventSSI(this.domain, eventPayload, anchorSignature);
+    const expectedEventHash = sha256(eventPayload, anchorSignature).toString("hex");
+
+    await appendEvent(this.storageRoot, this.anchorIdHex, serialized, basePrevHash.toString("hex"));
+    const events = await this.#refreshAnchorState();
+    const appendedEvent = events.find((item) => item.eventHash.toString("hex") === expectedEventHash);
+    if (!appendedEvent) {
+      throwError(ERROR_CODES.ERR_CONCURRENT_COMMIT, "Appended event could not be located after refresh");
+    }
+    return appendedEvent;
+  }
+
   async #recordEvent(eventPayloadFields) {
     this.#assertWritable();
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const baseSeq = this.anchorState.latestSeq;
-      const basePrevHash = this.anchorState.latestEventHash;
-      const timestampMs = Date.now();
-      const seq = baseSeq + 1;
-      const event = {
-        seq,
-        timestampMs,
-        prevEventHash: basePrevHash,
-        ...eventPayloadFields
-      };
-      const actorMessage = encodeActorMessage(event);
-      if (event.flags & EVENT_FLAGS.actorSignature) {
-        event.actorSignature = Buffer.from(this.didStrategy.sign(actorMessage));
-      }
-      if (event.flags & EVENT_FLAGS.actorHash) {
-        event.actorHash = this.#currentActorHash();
-      }
-      const eventPayload = encodeEventPayload(event);
-      const anchorSignature = ed25519Sign(this.anchorPrivate, eventPayload);
-      const serialized = makeEventSSI(this.domain, eventPayload, anchorSignature);
       try {
-        await appendEvent(this.storageRoot, this.anchorIdHex, serialized, basePrevHash.toString("hex"));
+        return await this.#appendEventOnce(eventPayloadFields);
       } catch (error) {
         if (error.code !== ERROR_CODES.ERR_CONCURRENT_COMMIT || attempt === 2) throw error;
-      }
-
-      const events = await readAndVerifyAnchor(
-        this.storageRoot,
-        this.domain,
-        this.anchorIdHex,
-        this.anchorPublic,
-        this.didStrategy,
-        this.accessIndexKey
-      );
-      this.events = events;
-      this.anchorState = reduceAnchorState(events);
-      this.anchorState.accessIndexKey = this.accessIndexKey;
-      const latest = events[events.length - 1];
-      if (latest.seq === seq) {
-        return latest;
+        await this.#refreshAnchorState();
       }
     }
     throwError(ERROR_CODES.ERR_CONCURRENT_COMMIT, "Failed to append event after retries");
@@ -123,23 +195,36 @@ class MountedLightDSU {
 
   async #commitVersion(payloadHash) {
     this.#assertWritable();
-    const plain = serializeBrickMap(this.brickMap);
-    const encrypted = aes256gcmEncrypt(this.brickMapKey, plain, Buffer.from("brickmap"));
-    const envelope = Buffer.concat([encrypted.nonce, encrypted.ciphertext, encrypted.tag]);
-    const brickMapHashHex = await writeBrick(this.storageRoot, envelope);
-    const fields = {
-      eventType: EVENT_TYPES.VERSION_COMMIT,
-      flags: EVENT_FLAGS.brickMapHash | EVENT_FLAGS.actorHash | EVENT_FLAGS.actorSignature,
-      brickMapHash: Buffer.from(brickMapHashHex, "hex")
-    };
-    if (payloadHash) {
-      fields.flags |= EVENT_FLAGS.payloadHash;
-      fields.payloadHash = payloadHash;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const nextBrickMap = this.#prepareBrickMapForCommit();
+      const plain = serializeBrickMap(nextBrickMap);
+      const encrypted = aes256gcmEncrypt(this.brickMapKey, plain, Buffer.from("brickmap"));
+      const envelope = Buffer.concat([encrypted.nonce, encrypted.ciphertext, encrypted.tag]);
+      const brickMapHashHex = await writeBrick(this.storageRoot, envelope);
+      const fields = {
+        eventType: EVENT_TYPES.VERSION_COMMIT,
+        flags: EVENT_FLAGS.brickMapHash | EVENT_FLAGS.actorHash | EVENT_FLAGS.actorSignature,
+        brickMapHash: Buffer.from(brickMapHashHex, "hex")
+      };
+      if (payloadHash) {
+        fields.flags |= EVENT_FLAGS.payloadHash;
+        fields.payloadHash = payloadHash;
+      }
+
+      try {
+        const event = await this.#appendEventOnce(fields);
+        this.brickMap = nextBrickMap;
+        this.baseBrickMap = cloneJSON(nextBrickMap);
+        this.dirty = false;
+        return { seq: event.seq, brickMapHash: brickMapHashHex, eventHash: event.eventHash.toString("hex") };
+      } catch (error) {
+        if (error.code !== ERROR_CODES.ERR_CONCURRENT_COMMIT || attempt === 2) {
+          throw error;
+        }
+        await this.#rebaseBrickMapOntoLatest();
+      }
     }
-    const event = await this.#recordEvent(fields);
-    this.brickMap.seq += 1;
-    this.dirty = false;
-    return { seq: event.seq, brickMapHash: brickMapHashHex, eventHash: event.eventHash.toString("hex") };
+    throwError(ERROR_CODES.ERR_CONCURRENT_COMMIT, "Failed to commit version after retries");
   }
 
   async #maybeAutoCommit() {
@@ -155,7 +240,7 @@ class MountedLightDSU {
   beginBatch() {
     if (this.isBatchMode) throwError(ERROR_CODES.ERR_BATCH_ALREADY_STARTED, "Batch already started");
     this.isBatchMode = true;
-    this.batchSnapshot = JSON.parse(JSON.stringify(this.brickMap));
+    this.batchSnapshot = cloneJSON(this.brickMap);
   }
 
   async commitBatch() {
@@ -425,10 +510,6 @@ class MountedLightDSU {
     const profile = getProfile(profileId);
     if (!profile) throwError(ERROR_CODES.ERR_UNSUPPORTED_PROFILE, `Unknown profileId: 0x${profileId.toString(16)}`);
 
-    const cpBuf = Buffer.isBuffer(canonicalPayload)
-      ? canonicalPayload
-      : Buffer.from(typeof canonicalPayload === "object" ? JSON.stringify(canonicalPayload) : String(canonicalPayload));
-
     const resourceHashHex = resource?.path || resource?.kind
       ? hashResource(this.accessIndexKey, normalizeScope(resource)).toString("hex")
       : null;
@@ -437,11 +518,16 @@ class MountedLightDSU {
       profileId,
       profileVersion: profileVersion || profile.version,
       payloadFormat:  payloadFormat || profile.payloadFormats[0],
-      canonicalPayload: cpBuf,
+      canonicalPayload,
       resourceHash: resourceHashHex ? Buffer.from(resourceHashHex, "hex") : null,
       versionSeq:   versionSeq != null ? versionSeq : null,
       externalReferences: externalReferences || null
     });
+
+    const validationErrors = validateStructural(v1);
+    if (validationErrors.length > 0) {
+      throwError(ERROR_CODES.ERR_INVALID_PROVENANCE_PROFILE, validationErrors.join("; "));
+    }
 
     const plain = encodeProvenancePayload(v1);
     const encrypted = aes256gcmEncrypt(this.brickMapKey, plain, Buffer.from("provenance"));
@@ -503,15 +589,7 @@ class MountedLightDSU {
       const tag = envelope.subarray(envelope.length - 16);
       const ciphertext = envelope.subarray(12, envelope.length - 16);
       const plain = aes256gcmDecrypt(this.brickMapKey, nonce, ciphertext, tag, Buffer.from("provenance"));
-
-      let v1;
-      try {
-        v1 = decodeProvenancePayload(plain);
-      } catch {
-        // Legacy payloads stored before ProvenancePayloadV1 – return raw
-        records.push({ seq: event.seq, payloadHash: payloadHashHex, legacy: true });
-        continue;
-      }
+      const v1 = decodeProvenancePayload(plain);
 
       const profile = getProfile(v1.profileId);
       records.push({
@@ -550,12 +628,6 @@ class MountedLightDSU {
     };
 
     for (const rec of records) {
-      if (rec.legacy) {
-        report.results.push({ seq: rec.seq, payloadHash: rec.payloadHash, valid: false, level: "structural", errors: ["legacy payload – not ProvenancePayloadV1"] });
-        report.valid = false;
-        continue;
-      }
-
       const result = { seq: rec.seq, payloadHash: rec.payloadHash, valid: true, errors: [], level: null };
 
       // Level 1: cryptographic – verify canonicalPayloadHash
@@ -656,6 +728,8 @@ class MountedLightDSU {
   }
 
   async runGarbageCollection() {
+    this.#assertWritable();
+    this.#checkCurrentAccess({ kind: "DSU", path: "/" }, PERMISSIONS.ADMIN);
     const mode = this.brickMap?.manifest?.retentionMode || "keep-all";
     const referenced = new Set();
     const addCurrentBrickMapAndFiles = () => {
@@ -687,7 +761,14 @@ class MountedLightDSU {
         .filter((event) => event.eventType === EVENT_TYPES.VERSION_COMMIT && event.brickMapHash)
         .map((event) => event.brickMapHash.toString("hex"))
         .slice(-keepVersions);
-      for (const hash of versionHashes) referenced.add(hash);
+      for (const hash of versionHashes) {
+        referenced.add(hash);
+        const historicalBrickMap = await MountedLightDSU.decryptBrickMap(this.storageRoot, hash, this.brickMapKey);
+        for (const entry of Object.values(historicalBrickMap.entries || {})) {
+          if (entry.type !== "file" || !Array.isArray(entry.chunks)) continue;
+          for (const chunk of entry.chunks) referenced.add(chunk.brickHash);
+        }
+      }
       for (const event of this.events) {
         if (event.payloadHash) referenced.add(event.payloadHash.toString("hex"));
       }
@@ -728,6 +809,9 @@ class MountedLightDSU {
   }
 
   setCurrentDID(did) {
+    if (typeof did !== "string" || !did.length) {
+      throwError(ERROR_CODES.ERR_INVALID_SSI, "DID must be non-empty string");
+    }
     this.currentDID = did;
     if (this.didStrategy && typeof this.didStrategy.setCurrentDID === "function") {
       this.didStrategy.setCurrentDID(did);

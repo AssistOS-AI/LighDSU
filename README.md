@@ -1,28 +1,28 @@
 # LightDSU v1
 
-LightDSU este o librărie locală pentru DSU-uri criptate, cu:
+LightDSU is a local library for encrypted DSUs (Data Security Units) with:
+
 - **KeySSI family**: `lkey`, `rkey`, `lza`
-- **anchor local append-only**: fișier line-oriented cu `ssi:event`
-- **BrickMap criptat**: snapshot complet al sistemului virtual de fișiere
-- **bricks criptate**: content-addressed, AES-256-GCM
-- **access + audit + provenance**: pe bază de EventSSI
+- **Local append-only anchors**: line-oriented `ssi:event` chains
+- **Encrypted BrickMap snapshots**: complete virtual filesystem state per version
+- **Encrypted bricks**: content-addressed AES-256-GCM envelopes
+- **Access, audit, and provenance**: recorded through EventSSI
 
-Specificația tehnică self-contained: [`docs/lightdsu-v1-spec.md`](docs/lightdsu-v1-spec.md)
-Review de securitate și decizii de hardening: [`docs/security-review.md`](docs/security-review.md)
+The DS specifications in `docs/specs/` are the authoritative contract set. The consolidated summary is available at [`docs/lightdsu-v1-spec.md`](docs/lightdsu-v1-spec.md), and the hardening review is available at [`docs/security-review.md`](docs/security-review.md).
 
-## Instalare
+## Install
 
 ```bash
 npm install
 ```
 
-## Rulare teste
+## Run tests
 
 ```bash
 npm test
 ```
 
-## Structură locală storage
+## Local storage layout
 
 ```text
 <storageRoot>/
@@ -35,17 +35,17 @@ npm test
   locks/
 ```
 
-## Convenție SSI
+## SSI convention
 
 - `ssi:lkey:<domain>:<payloadB58>:v1`
 - `ssi:rkey:<domain>:<payloadB58>:v1`
 - `ssi:lza:<domain>:<payloadB58>:v1`
 - `ssi:event:<domain>:<payloadB58>:<signatureB58>:v1`
 
-## API public
+## Public API
 
 ```js
-const { LightDSUEngine, DefaultDidStrategy, PERMISSIONS } = require("lighdsu");
+const { LightDSUEngine, DefaultDidStrategy } = require("lighdsu");
 
 const engine = await LightDSUEngine.open({
   storageRoot: "/tmp/lightdsu-demo",
@@ -68,45 +68,25 @@ const data = await dsu.readFile("/docs/a.txt");
 - `engine.setCurrentDID(did) -> void`
 - `engine.close()`
 
-### Filesystem API
+### Mounted DSU
 
-- `readFile`, `writeFile`, `appendToFile`
-- `createFolder`, `delete`, `rename`
-- `stat`, `readDir`, `listFiles`, `listFolders`
+- Filesystem: `readFile`, `writeFile`, `appendToFile`, `createFolder`, `delete`, `rename`, `stat`, `readDir`, `listFiles`, `listFolders`
+- Batch: `beginBatch`, `commitBatch`, `cancelBatch`, `hasUncommittedChanges`
+- Access: `grantAccess`, `revokeAccess`, `checkAccess`, `listAccess`
+- Provenance: `appendProvenance`, `getProvenance`, `getHistory`, `validateProvenance`, `listProvenanceProfiles`, `getProvenancePolicy`, `updateProvenancePolicy`
+- Utility: `verifyAnchor`, `getLatestEventHash`, `runGarbageCollection`, `setCurrentDID`
 
-### Batch API
+## v1 implementation highlights
 
-- `beginBatch()`
-- `commitBatch()`
-- `cancelBatch()`
-- `hasUncommittedChanges()`
+- HKDF-SHA256 key derivation from `lkeySecret`
+- Ed25519 anchor signing
+- AES-256-GCM encryption for BrickMap, provenance bricks, and file bricks
+- SHA-256 and HMAC-SHA256 integrity/indexing primitives
+- Complete BrickMap snapshots per version with concurrent commit rebasing
+- Strict scope validation and explicit error codes
+- Provenance profile validation before persistence
+- Retention-window garbage collection that preserves retained historical file bricks
 
-### Access API
+## Standard error codes
 
-- `grantAccess(subjectDID, scope, permissions, options?)`
-- `revokeAccess(subjectDID, scope, permissions, options?)`
-- `checkAccess(subjectDID, scope, permissions)`
-- `listAccess()`
-
-### Provenance API
-
-- `appendProvenance(resource, payload, options?)`
-- `getProvenance()`
-- `getHistory(query?)`
-- `setCurrentDID(did)`
-
-## Implementare v1 (esențial)
-
-- Derivări chei prin HKDF-SHA256 din `lkeySecret`:
-  - `anchorSigningSeed`
-  - `rkeySecret`
-  - `brickMapKey`
-  - `accessIndexKey`
-- Semnare ancoră: Ed25519
-- Criptare bricks / brickmap: AES-256-GCM
-- Hashing: SHA-256, HMAC-SHA256
-- Reducere AnchorState: seq, latest hash, latest BrickMap, grants/revokes, policy, keyEpoch
-
-## Erori standard expuse
-
-`ERR_INVALID_SSI`, `ERR_DOMAIN_MISMATCH`, `ERR_UNSUPPORTED_VERSION`, `ERR_ANCHOR_NOT_FOUND`, `ERR_EVENT_PARSE_FAILED`, `ERR_EVENT_SIGNATURE_INVALID`, `ERR_EVENT_CHAIN_INVALID`, `ERR_BRICK_NOT_FOUND`, `ERR_BRICK_HASH_MISMATCH`, `ERR_DECRYPTION_FAILED`, `ERR_ACCESS_DENIED`, `ERR_READ_ONLY_DSU`, `ERR_BATCH_ALREADY_STARTED`, `ERR_NO_BATCH_IN_PROGRESS`, `ERR_CONCURRENT_COMMIT`, `ERR_INVALID_PATH`, `ERR_INVALID_PERMISSION`.
+`ERR_INVALID_SSI`, `ERR_INVALID_SCOPE`, `ERR_DOMAIN_MISMATCH`, `ERR_UNSUPPORTED_VERSION`, `ERR_ANCHOR_NOT_FOUND`, `ERR_EVENT_PARSE_FAILED`, `ERR_EVENT_SIGNATURE_INVALID`, `ERR_EVENT_CHAIN_INVALID`, `ERR_BRICK_NOT_FOUND`, `ERR_BRICK_HASH_MISMATCH`, `ERR_DECRYPTION_FAILED`, `ERR_ACCESS_DENIED`, `ERR_READ_ONLY_DSU`, `ERR_BATCH_ALREADY_STARTED`, `ERR_NO_BATCH_IN_PROGRESS`, `ERR_CONCURRENT_COMMIT`, `ERR_INVALID_PATH`, `ERR_INVALID_PERMISSION`, `ERR_INVALID_PROVENANCE_PROFILE`, `ERR_PROVENANCE_VALIDATION_FAILED`, `ERR_UNSUPPORTED_PROFILE`.

@@ -4,6 +4,14 @@ const { decode, encode } = require("./crypto/base58");
 const { SSI_TYPES } = require("./constants");
 const { ERROR_CODES, throwError } = require("./errors");
 
+function decodeSSIComponent(value, componentName) {
+  try {
+    return decode(value);
+  } catch {
+    throwError(ERROR_CODES.ERR_INVALID_SSI, `Invalid Base58 in SSI ${componentName}`);
+  }
+}
+
 function parseSSI(ssi) {
   if (typeof ssi !== "string") {
     throwError(ERROR_CODES.ERR_INVALID_SSI, "SSI must be string");
@@ -24,8 +32,8 @@ function parseSSI(ssi) {
     return {
       type,
       domain: parts[2],
-      payload: decode(parts[3]),
-      signature: decode(parts[4]),
+      payload: decodeSSIComponent(parts[3], "payload"),
+      signature: decodeSSIComponent(parts[4], "signature"),
       version: parts[5]
     };
   }
@@ -36,7 +44,7 @@ function parseSSI(ssi) {
   return {
     type,
     domain: parts[2],
-    payload: decode(parts[3]),
+    payload: decodeSSIComponent(parts[3], "payload"),
     version: parts[4]
   };
 }

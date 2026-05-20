@@ -8,6 +8,8 @@ const path = require("node:path");
 const { LightDSUEngine, DefaultDidStrategy, PERMISSIONS, ERROR_CODES, EVENT_TYPES } = require("../src");
 const { EVENT_FLAGS } = require("../src/constants");
 const { encodeEventPayload } = require("../src/eventCodec");
+const { MountedLightDSU } = require("../src/dsu");
+const { readBrick } = require("../src/storage");
 const { makeEventSSI } = require("../src/ssi");
 const { ed25519Sign, randomBytes } = require("../src/crypto/primitives");
 
@@ -51,6 +53,7 @@ test("domain mismatch and SSI validation errors", async () => {
   await assert.rejects(() => LightDSUEngine.open({ storageRoot: dir, domain: "bad:domain", currentDID: "did:x" }), {
     code: ERROR_CODES.ERR_INVALID_SSI
   });
+  assert.throws(() => engineLocal.parseSSI("ssi:lkey:local:0:v1"), { code: ERROR_CODES.ERR_INVALID_SSI });
 });
 
 test("filesystem API complete flow", async () => {
@@ -138,6 +141,25 @@ test("access control: exact + recursive scopes, grant/revoke/check/list", async 
 
   await assert.rejects(
     () => created.dsu.grantAccess("did:example:bob", recursiveScope, 1 << 14),
+    { code: ERROR_CODES.ERR_INVALID_PERMISSION }
+  );
+});
+
+test("invalid scopes and non-integer permissions are rejected", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:owner");
+  const created = await engine.createDSU();
+
+  await assert.rejects(
+    () => created.dsu.grantAccess("did:example:bob", { kind: "bogus" }, PERMISSIONS.READ),
+    { code: ERROR_CODES.ERR_INVALID_SCOPE }
+  );
+  await assert.rejects(
+    () => created.dsu.grantAccess("did:example:bob", { kind: "file" }, PERMISSIONS.READ),
+    { code: ERROR_CODES.ERR_INVALID_SCOPE }
+  );
+  await assert.rejects(
+    () => created.dsu.grantAccess("did:example:bob", { kind: "DSU", path: "/" }, 1.5),
     { code: ERROR_CODES.ERR_INVALID_PERMISSION }
   );
 });
@@ -330,7 +352,7 @@ test("invalid path is rejected", async () => {
   await assert.rejects(() => dsu.writeFile("../escape.txt", Buffer.from("x")), { code: ERROR_CODES.ERR_INVALID_PATH });
 });
 
-test("concurrent commits on same anchor remain valid", async () => {
+test("concurrent commits preserve both writes and keep anchor valid", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
   const engine1 = await makeEngine(dir, "did:example:alice");
   const created = await engine1.createDSU();
@@ -344,6 +366,8 @@ test("concurrent commits on same anchor remain valid", async () => {
 
   const verify = await created.dsu.verifyAnchor();
   assert.equal(verify.valid, true);
+  const reloaded = await engine1.loadDSU(created.lkeySSI);
+  assert.deepEqual(reloaded.listFiles("/"), ["/one.txt", "/two.txt"]);
 });
 
 test("garbage collection for purge-obsolete removes old bricks", async () => {
@@ -356,6 +380,52 @@ test("garbage collection for purge-obsolete removes old bricks", async () => {
   const report = await dsu.runGarbageCollection();
   assert.equal(report.mode, "purge-obsolete");
   assert.ok(report.removedBricks >= 0);
+});
+
+test("retention-window keeps bricks for retained historical versions", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const { dsu } = await engine.createDSU();
+  dsu.brickMap.manifest.retentionMode = "retention-window";
+
+  for (let version = 0; version < 12; version += 1) {
+    await dsu.writeFile("/history.txt", Buffer.from(`v${version}`));
+  }
+
+  const retainedHashes = dsu.events
+    .filter((event) => event.eventType === EVENT_TYPES.VERSION_COMMIT && event.brickMapHash)
+    .map((event) => event.brickMapHash.toString("hex"))
+    .slice(-10);
+  const oldestRetainedBrickMap = await MountedLightDSU.decryptBrickMap(dir, retainedHashes[0], dsu.brickMapKey);
+  const retainedChunkHash = oldestRetainedBrickMap.entries["/history.txt"].chunks[0].brickHash;
+
+  const report = await dsu.runGarbageCollection();
+  assert.equal(report.mode, "retention-window");
+  assert.ok(Buffer.isBuffer(await readBrick(dir, retainedChunkHash)));
+});
+
+test("garbage collection requires a writable mount", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const created = await engine.createDSU();
+  const rMounted = await engine.loadDSU(created.rkeySSI);
+
+  await assert.rejects(() => rMounted.runGarbageCollection(), { code: ERROR_CODES.ERR_READ_ONLY_DSU });
+});
+
+test("brickMap seq and manifest timestamp persist after commits", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lightdsu-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const created = await engine.createDSU();
+  const beforeUpdatedAt = created.dsu.brickMap.manifest.updatedAt;
+
+  await created.dsu.writeFile("/seq.txt", Buffer.from("v1"));
+  assert.equal(created.dsu.brickMap.seq, 1);
+  assert.ok(created.dsu.brickMap.manifest.updatedAt >= beforeUpdatedAt);
+
+  const reloaded = await engine.loadDSU(created.lkeySSI);
+  assert.equal(reloaded.brickMap.seq, 1);
+  assert.equal(reloaded.brickMap.manifest.updatedAt, created.dsu.brickMap.manifest.updatedAt);
 });
 
 test("setCurrentDID updates actor context for future events", async () => {

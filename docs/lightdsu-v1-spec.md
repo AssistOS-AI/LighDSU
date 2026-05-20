@@ -1,27 +1,31 @@
-# LightDSU v1 — specificație tehnică (self-contained)
+# LightDSU v1 — Consolidated Technical Summary
 
-## 1. Scop
+This document is a compact, self-contained summary of LightDSU v1. The authoritative contract remains the DS specification set in `docs/specs/`.
 
-LightDSU este o librărie locală pentru stocare/versionare/audit/access-control pentru DSU-uri criptate, inspirată din OpenDSU:
-- DSU = unitate de date segmentată în bricks criptate.
-- BrickMap = snapshot criptat al sistemului virtual de fișiere + referințe chunks/keys.
-- Anchor = lanț append-only de `ssi:event` semnate, stocat local.
+## 1. Scope
 
-v1 implementează strict local:
-- storage local (`anchors`, `bricks`, `tmp`, `locks`)
-- SSI compacte (`lkey`, `rkey`, `lza`, `event`)
-- EventSSI semnate cu Ed25519
-- BrickMap criptat AES-256-GCM
-- API filesystem + batch + access + provenance
+LightDSU is a local library for storing, versioning, auditing, and controlling access to encrypted DSUs inspired by OpenDSU:
 
-## 2. Convenție SSI
+- A **DSU** is a data unit segmented into encrypted bricks.
+- The **BrickMap** is an encrypted snapshot of the virtual filesystem, including file metadata, chunk references, and file keys.
+- The **anchor** is a local append-only chain of signed `ssi:event` lines.
+
+Version 1 is intentionally local-only and includes:
+
+- local storage layout (`anchors`, `bricks`, `tmp`, `locks`)
+- compact SSI family (`lkey`, `rkey`, `lza`, `event`)
+- Ed25519-signed EventSSI records
+- AES-256-GCM encrypted BrickMap and data bricks
+- filesystem, batch, access-control, provenance, and garbage-collection APIs
+
+## 2. SSI Convention
 
 - `ssi:lkey:<domain>:<base58(lkeySecret)>:v1`
 - `ssi:rkey:<domain>:<base58(rkeySecret|anchorPublic)>:v1`
 - `ssi:lza:<domain>:<base58(anchorPublic)>:v1`
 - `ssi:event:<domain>:<base58(eventPayload)>:<base58(anchorSignature)>:v1`
 
-Engine:
+Engine initialization:
 
 ```js
 LightDSUEngine.open({
@@ -32,7 +36,7 @@ LightDSUEngine.open({
 });
 ```
 
-## 3. Derivări criptografice
+## 3. Cryptographic Derivations
 
 - `anchorSigningSeed = HKDF(lkeySecret, empty, "anchor-signing", 32)`
 - `rkeySecret = HKDF(lkeySecret, empty, "read-key", 32)`
@@ -41,32 +45,36 @@ LightDSUEngine.open({
 - `brickMapKey = HKDF(rkeySecret, anchorId, "brickmap", 32)`
 - `accessIndexKey = HKDF(rkeySecret, anchorId, "access-index", 32)`
 
-Suite v1:
+Fixed v1 suite:
+
 - SHA-256
 - HKDF-SHA256
 - HMAC-SHA256
 - Ed25519
 - AES-256-GCM
-- Base58 pentru payload-uri SSI
+- Base58
 
-## 4. EventSSI payload
+## 4. EventSSI Payload
 
 Header:
+
 - `u8 eventType`
 - `u16 flags`
 - `uvarint seq`
 - `u48 timestampMs`
 - `bytes32 prevEventHash`
 
-Câmpuri opționale (ordonate fix prin flags):
-- `brickMapHash`, `payloadHash`, `subjectHash`, `resourceHash`, `permissions`, `policyWord`,
-  `keyEpoch`, `grantId`, `actorHash`, `actorSignature`, `anchorPublic`, `extension`
+Optional fields in fixed order:
 
-Semnături:
+- `brickMapHash`, `payloadHash`, `subjectHash`, `resourceHash`, `permissions`, `policyWord`
+- `keyEpoch`, `grantId`, `actorHash`, `actorSignature`, `anchorPublic`, `extension`
+
+Signatures and hashes:
+
 - `anchorSignature = Ed25519.sign(anchorPrivate, eventPayload)`
 - `eventHash = SHA256(eventPayload | anchorSignature)`
 
-## 5. Tipuri de eveniment
+## 5. Event Types
 
 - `GENESIS`
 - `VERSION_COMMIT`
@@ -77,7 +85,7 @@ Semnături:
 - `POLICY_UPDATE`
 - `KEY_EPOCH`
 
-## 6. AnchorState redus
+## 6. Reduced AnchorState
 
 - `latestSeq`
 - `latestEventHash`
@@ -87,9 +95,10 @@ Semnături:
 - `policy`
 - `keyEpoch`
 
-## 7. API public
+## 7. Public API
 
 ### Engine
+
 - `open`
 - `createDSU`
 - `loadDSU`
@@ -98,21 +107,26 @@ Semnături:
 - `close`
 
 ### Mounted DSU
-- filesystem: `readFile`, `writeFile`, `appendToFile`, `createFolder`, `delete`, `rename`, `stat`, `readDir`, `listFiles`, `listFolders`
-- batch: `beginBatch`, `commitBatch`, `cancelBatch`, `hasUncommittedChanges`
-- access: `grantAccess`, `revokeAccess`, `checkAccess`, `listAccess`
-- provenance/history: `appendProvenance`, `getProvenance`, `getHistory`
-- actor context: `setCurrentDID`, `verifyAnchor`, `getLatestEventHash`
 
-## 8. Reguli operaționale
+- Filesystem: `readFile`, `writeFile`, `appendToFile`, `createFolder`, `delete`, `rename`, `stat`, `readDir`, `listFiles`, `listFolders`
+- Batch: `beginBatch`, `commitBatch`, `cancelBatch`, `hasUncommittedChanges`
+- Access: `grantAccess`, `revokeAccess`, `checkAccess`, `listAccess`
+- Provenance/history: `appendProvenance`, `getProvenance`, `getHistory`, `validateProvenance`, `listProvenanceProfiles`, `getProvenancePolicy`, `updateProvenancePolicy`
+- Runtime utilities: `setCurrentDID`, `verifyAnchor`, `getLatestEventHash`, `runGarbageCollection`
 
-- `lkey`: control complet (scriere, commit, grant/revoke, citire, verificare)
-- `rkey`: read-only (decriptare BrickMap + citire, fără evenimente de scriere)
-- `lza`: verificare ancoră și inspecție structurală, fără acces la conținut
+## 8. Operational Rules
 
-## 9. Erori standard
+- `lkey`: full control (write, commit, grant/revoke, read, verify)
+- `rkey`: read-only (decrypt BrickMap, read content if access grants allow it, verify)
+- `lza`: anchor verification and structural inspection only
+- Concurrent VERSION_COMMIT retries rebuild from the latest committed BrickMap snapshot before retrying
+- Garbage collection requires a writable `lkey` mount and ADMIN access
+- Invalid scope objects are rejected explicitly; they are never coerced into broader DSU scope
+
+## 9. Standard Errors
 
 - `ERR_INVALID_SSI`
+- `ERR_INVALID_SCOPE`
 - `ERR_DOMAIN_MISMATCH`
 - `ERR_UNSUPPORTED_VERSION`
 - `ERR_ANCHOR_NOT_FOUND`
@@ -129,14 +143,18 @@ Semnături:
 - `ERR_CONCURRENT_COMMIT`
 - `ERR_INVALID_PATH`
 - `ERR_INVALID_PERMISSION`
+- `ERR_INVALID_PROVENANCE_PROFILE`
+- `ERR_PROVENANCE_VALIDATION_FAILED`
+- `ERR_UNSUPPORTED_PROFILE`
 
-## 10. Decizii de securitate operațională (implementate)
+## 10. Security and Integrity Decisions
 
-- `ADMIN` respectă scope-ul grantului (nu este global implicit).
-- `grantId` este unic per grant (`eventHash`), iar `REVOKE` fără `grantId` operează pe tuple active.
-- `REVOKE` cu `grantId` validează dreptul de revocare pe scope-ul grantului țintit.
-- Operațiile FS validează strict existența/tipul path-urilor.
-- Verificarea ancorei include semnături actor + anchor și consistența lanțului (`seq`, `prevEventHash`).
+- `ADMIN` remains scope-bound; it does not bypass grant scope globally.
+- `grantId` is the GRANT event hash, and revoke-by-grantId authorizes against the target grant scope.
+- Filesystem operations validate paths and entry types strictly.
+- Anchor verification includes actor signatures, anchor signatures, sequence continuity, and previous-event hash continuity.
+- Provenance payloads are validated before persistence and decoded strictly on read.
+- Retention-window GC preserves the file bricks referenced by retained historical BrickMaps.
 
 ---
 
@@ -144,21 +162,24 @@ Semnături:
 
 ### ProvenancePayloadV1
 
-Every provenance event stores an encrypted `ProvenancePayloadV1` brick. The outer struct carries:
+Each provenance event stores an encrypted `ProvenancePayloadV1` brick with:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `profileId` | u16 | One of the 10 defined profile IDs |
-| `profileVersion` | u16 | Profile version supported by this payload |
+| `profileId` | u16 | One of the defined profile IDs |
+| `profileVersion` | u16 | Supported profile version |
 | `payloadFormat` | u8 | 0x01 CBOR / 0x02 JSON / 0x03 JSON-LD / 0x04 RDF/Turtle / 0x05 FHIR JSON / 0x06 binary |
 | `createdAt` | u48 ms | Timestamp |
-| `resourceHash` | bytes32? | Optional — HMAC of the referenced resource |
-| `versionSeq` | uvarint? | Optional DSU version number |
-| `canonicalPayloadHash` | bytes32 | SHA-256 of the raw `canonicalPayload` (inner integrity check) |
+| `resourceHash` | bytes32? | Optional referenced resource hash |
+| `versionSeq` | uvarint? | Optional DSU version sequence |
+| `canonicalPayloadHash` | bytes32 | SHA-256 of canonical payload bytes |
 | `canonicalPayload` | bytes | Profile-specific data |
-| `externalReferences` | list? | `{ type, ref, hash }` entries for external artefacts |
+| `externalReferences` | list? | `{ type, ref, hash }` entries |
 
-Double-hash invariant: `canonicalPayloadHash = SHA256(canonicalPayload)` and the EventSSI `payloadHash = SHA256(encryptedBrickEnvelope)`.
+Double-hash invariant:
+
+- `canonicalPayloadHash = SHA256(canonicalPayload)`
+- Event `payloadHash = SHA256(encryptedBrickEnvelope)`
 
 ### Profile IDs
 
@@ -175,34 +196,28 @@ Double-hash invariant: `canonicalPayloadHash = SHA256(canonicalPayload)` and the
 | 0x0009 | OECD_GLP_DATA_INTEGRITY | OECD GLP Data Integrity |
 | 0x000A | AI_ML_EXPERIMENT | Native LightDSU ML experiment provenance |
 
-### New DSU APIs
+### Provenance APIs
 
 ```js
-// Append provenance (profile-aware)
 dsu.appendProvenance(resource, {
-  profileId,           // PROVENANCE_PROFILES constant
-  profileVersion?,     // defaults to profile.version
-  payloadFormat?,      // defaults to profile.payloadFormats[0]
-  canonicalPayload,    // Buffer or JSON-serialisable object
-  externalReferences?, // [{ type, ref, hash }]
+  profileId,
+  profileVersion?,
+  payloadFormat?,
+  canonicalPayload,
+  externalReferences?,
   versionSeq?
 }) -> { seq, payloadHash, canonicalPayloadHash, profileId, profileName }
 
-// Retrieve and decode provenance records
 dsu.getProvenance({ payloadHash?, resourceHash?, profileId? }) -> ProvenanceRecord[]
-
-// 3-level validation: cryptographic → structural → domain
 dsu.validateProvenance(query?, options?) -> ProvenanceValidationReport
-
-// Enumerate supported profiles
 dsu.listProvenanceProfiles() -> ProvenanceProfileDescriptor[]
-
-// Policy management
 dsu.getProvenancePolicy() -> ProvenancePolicy
 dsu.updateProvenancePolicy(policyUpdate, options?) -> { seq, policy }
 ```
 
-### Manifest provenancePolicy
+`appendProvenance()` validates structural and domain rules before persisting a provenance record.
+
+### Manifest `provenancePolicy`
 
 ```json
 {
@@ -213,3 +228,5 @@ dsu.updateProvenancePolicy(policyUpdate, options?) -> { seq, policy }
   "auditMode": "no-read-audit"
 }
 ```
+
+In v1, this `auditMode` field is descriptive policy metadata. Runtime read-audit behavior still depends on explicit `readFile({ audit: true })` calls or an anchor `policyWord` set by the implementation.

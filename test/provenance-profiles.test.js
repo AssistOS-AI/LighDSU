@@ -7,9 +7,15 @@ const os = require("node:os");
 const fs = require("node:fs/promises");
 
 const { LightDSUEngine, DefaultDidStrategy, PROVENANCE_PROFILES, PAYLOAD_FORMAT, PROVENANCE_EVENT_KIND, ERROR_CODES } = require("../src/index");
+const { EVENT_TYPES, EVENT_FLAGS } = require("../src/constants");
 const { encodeProvenancePayload, decodeProvenancePayload, buildProvenancePayloadV1 } = require("../src/provenancePayloadCodec");
 const { listProfiles, getProfile, validateStructural } = require("../src/provenanceProfiles");
-const { sha256 } = require("../src/crypto/primitives");
+const { encodeActorMessage } = require("../src/actorMessage");
+const { hashDid } = require("../src/access");
+const { appendAnchorLine, writeBrick } = require("../src/storage");
+const { encodeEventPayload } = require("../src/eventCodec");
+const { makeEventSSI } = require("../src/ssi");
+const { sha256, aes256gcmEncrypt, ed25519Sign } = require("../src/crypto/primitives");
 
 async function makeEngine(dir, did) {
   const strategy = new DefaultDidStrategy(did);
@@ -106,6 +112,22 @@ test("decodeProvenancePayload rejects unknown version tag", () => {
   const buf = Buffer.alloc(4);
   buf.writeUInt8(0xff, 0); // bad version tag
   assert.throws(() => decodeProvenancePayload(buf), { code: ERROR_CODES.ERR_INVALID_PROVENANCE_PROFILE });
+});
+
+test("buildProvenancePayloadV1 canonicalizes object payloads before hashing", () => {
+  const left = buildProvenancePayloadV1({
+    profileId: PROVENANCE_PROFILES.LIGHTDSU_MINIMAL,
+    payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
+    canonicalPayload: { b: 2, a: 1 }
+  });
+  const right = buildProvenancePayloadV1({
+    profileId: PROVENANCE_PROFILES.LIGHTDSU_MINIMAL,
+    payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
+    canonicalPayload: { a: 1, b: 2 }
+  });
+
+  assert.equal(left.canonicalPayload.toString("utf8"), "{\"a\":1,\"b\":2}");
+  assert.equal(left.canonicalPayloadHash.toString("hex"), right.canonicalPayloadHash.toString("hex"));
 });
 
 // ---------------------------------------------------------------------------
@@ -342,48 +364,44 @@ test("validateProvenance: three-level validation passes for valid payload", asyn
   assert.deepEqual(report.results[0].errors, []);
 });
 
-test("validateProvenance: structural failure from domain validator", async () => {
+test("appendProvenance rejects structurally invalid LIGHTDSU_MINIMAL payloads", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ldsu-prov-"));
   const engine = await makeEngine(dir, "did:example:alice");
   const { dsu } = await engine.createDSU();
 
-  // Store a payload that is LIGHTDSU_MINIMAL but missing required fields
-  await dsu.appendProvenance({ kind: "DSU", path: "/" }, {
-    profileId: PROVENANCE_PROFILES.LIGHTDSU_MINIMAL,
-    payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
-    canonicalPayload: JSON.stringify({ eventKind: "ANALYZE" }) // missing required fields
-  });
-
-  const report = await dsu.validateProvenance({});
-  assert.equal(report.valid, false);
-  assert.ok(report.results[0].errors.length > 0);
+  await assert.rejects(
+    () => dsu.appendProvenance({ kind: "DSU", path: "/" }, {
+      profileId: PROVENANCE_PROFILES.LIGHTDSU_MINIMAL,
+      payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
+      canonicalPayload: { eventKind: "ANALYZE" }
+    }),
+    { code: ERROR_CODES.ERR_INVALID_PROVENANCE_PROFILE }
+  );
 });
 
-test("validateProvenance: GXP_AUDIT_TRAIL detects missing changeReason for DELETE", async () => {
+test("appendProvenance rejects GXP payloads that miss changeReason for DELETE", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ldsu-prov-"));
   const engine = await makeEngine(dir, "did:example:alice");
   const { dsu } = await engine.createDSU();
 
-  await dsu.appendProvenance({ kind: "DSU", path: "/" }, {
-    profileId: PROVENANCE_PROFILES.GXP_AUDIT_TRAIL,
-    payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
-    canonicalPayload: JSON.stringify({
-      regulatedRecordType: "analytical-result",
-      operation: "DELETE",
-      actorHash: "did:example:operator",
-      timestampMs: Date.now(),
-      resourceHash: "aa".repeat(32),
-      // changeReason intentionally omitted
-      systemId: "lims",
-      systemVersion: "1.0",
-      reviewStatus: "pending",
-      retentionClass: "GMP-5yr"
-    })
-  });
-
-  const report = await dsu.validateProvenance({});
-  assert.equal(report.valid, false);
-  assert.ok(report.results[0].errors.some((e) => e.includes("changeReason")));
+  await assert.rejects(
+    () => dsu.appendProvenance({ kind: "DSU", path: "/" }, {
+      profileId: PROVENANCE_PROFILES.GXP_AUDIT_TRAIL,
+      payloadFormat: PAYLOAD_FORMAT.CANONICAL_JSON,
+      canonicalPayload: {
+        regulatedRecordType: "analytical-result",
+        operation: "DELETE",
+        actorHash: "did:example:operator",
+        timestampMs: Date.now(),
+        resourceHash: "aa".repeat(32),
+        systemId: "lims",
+        systemVersion: "1.0",
+        reviewStatus: "pending",
+        retentionClass: "GMP-5yr"
+      }
+    }),
+    { code: ERROR_CODES.ERR_INVALID_PROVENANCE_PROFILE }
+  );
 });
 
 test("multiple profiles stored in same DSU, filter by profileId", async () => {
@@ -498,6 +516,35 @@ test("appendProvenance with externalReferences roundtrips correctly", async () =
   assert.equal(records[0].externalReferences[0].type, "doi");
   assert.equal(records[0].externalReferences[1].type, "mlflow");
   assert.equal(records[0].externalReferences[1].hash, null);
+});
+
+test("getProvenance surfaces undecodable payloads instead of treating them as legacy", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ldsu-prov-"));
+  const engine = await makeEngine(dir, "did:example:alice");
+  const { dsu, lkeySSI } = await engine.createDSU();
+
+  const invalidPayload = Buffer.from([0xff, 0x00, 0x00, 0x00]);
+  const encrypted = aes256gcmEncrypt(dsu.brickMapKey, invalidPayload, Buffer.from("provenance"));
+  const envelope = Buffer.concat([encrypted.nonce, encrypted.ciphertext, encrypted.tag]);
+  const payloadHashHex = await writeBrick(dir, envelope);
+
+  const event = {
+    eventType: EVENT_TYPES.PROVENANCE,
+    flags: EVENT_FLAGS.payloadHash | EVENT_FLAGS.actorHash | EVENT_FLAGS.actorSignature,
+    seq: dsu.anchorState.latestSeq + 1,
+    timestampMs: Date.now(),
+    prevEventHash: dsu.anchorState.latestEventHash,
+    payloadHash: Buffer.from(payloadHashHex, "hex")
+  };
+  event.actorHash = hashDid(dsu.accessIndexKey, dsu.didStrategy, dsu.currentDID);
+  event.actorSignature = Buffer.from(dsu.didStrategy.sign(encodeActorMessage(event)));
+
+  const payload = encodeEventPayload(event);
+  const anchorSignature = ed25519Sign(dsu.anchorPrivate, payload);
+  await appendAnchorLine(dir, dsu.anchorIdHex, makeEventSSI("test", payload, anchorSignature));
+
+  const reloaded = await engine.loadDSU(lkeySSI);
+  await assert.rejects(() => reloaded.getProvenance(), { code: ERROR_CODES.ERR_INVALID_PROVENANCE_PROFILE });
 });
 
 // ---------------------------------------------------------------------------

@@ -3,11 +3,36 @@
 const { hmacSha256, sha256 } = require("./crypto/primitives");
 const { hasPermission, PERMISSIONS, RESOURCE_KIND, SCOPE_MODE } = require("./constants");
 const { normalizePath } = require("./utils");
+const { throwError, ERROR_CODES } = require("./errors");
+
+const VALID_SCOPE_KINDS = new Set(Object.keys(RESOURCE_KIND));
+const VALID_SCOPE_MODES = new Set(["exact", "recursive", "prefix"]);
+const VALID_SCOPE_MODE_VALUES = new Set(Object.values(SCOPE_MODE));
 
 function normalizeScope(scope = {}) {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    throwError(ERROR_CODES.ERR_INVALID_SCOPE, "Scope must be an object");
+  }
   const kind = scope.kind || "DSU";
-  const path = scope.path ? normalizePath(scope.path) : "/";
-  let scopeMode = SCOPE_MODE.exact;
+  if (!VALID_SCOPE_KINDS.has(kind)) {
+    throwError(ERROR_CODES.ERR_INVALID_SCOPE, `Unsupported scope kind: ${kind}`);
+  }
+  if (scope.scopeMode !== undefined) {
+    if (typeof scope.scopeMode === "string" && !VALID_SCOPE_MODES.has(scope.scopeMode)) {
+      throwError(ERROR_CODES.ERR_INVALID_SCOPE, `Unsupported scope mode: ${scope.scopeMode}`);
+    }
+    if (typeof scope.scopeMode === "number" && !VALID_SCOPE_MODE_VALUES.has(scope.scopeMode)) {
+      throwError(ERROR_CODES.ERR_INVALID_SCOPE, `Unsupported scope mode: ${scope.scopeMode}`);
+    }
+    if (typeof scope.scopeMode !== "string" && typeof scope.scopeMode !== "number") {
+      throwError(ERROR_CODES.ERR_INVALID_SCOPE, `Unsupported scope mode: ${scope.scopeMode}`);
+    }
+  }
+  if (kind !== "DSU" && typeof scope.path !== "string") {
+    throwError(ERROR_CODES.ERR_INVALID_SCOPE, `Scope path is required for kind ${kind}`);
+  }
+  const path = kind === "DSU" && scope.path === undefined ? "/" : normalizePath(scope.path || "/");
+  let scopeMode = typeof scope.scopeMode === "number" ? scope.scopeMode : SCOPE_MODE.exact;
   if (scope.scopeMode === "prefix") scopeMode = SCOPE_MODE.prefix;
   else if (scope.recursive || scope.scopeMode === "recursive") scopeMode = SCOPE_MODE.recursive;
   const recursive = scopeMode === SCOPE_MODE.recursive;
@@ -104,6 +129,9 @@ function verifyPermissionMask(requiredPermissions) {
     PERMISSIONS.ADMIN |
     PERMISSIONS.AUDIT |
     PERMISSIONS.PROVENANCE_APPEND;
+  if (!Number.isInteger(requiredPermissions) || requiredPermissions <= 0 || requiredPermissions > 0xffff) {
+    return false;
+  }
   return (requiredPermissions & ~ALL_DEFINED_BITS) === 0;
 }
 

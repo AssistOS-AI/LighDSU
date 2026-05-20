@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LightDSU v1 — Documentation</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'default' });
+  </script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1a1a2e; background: #f8f9fa; }
+    header { background: #16213e; color: #e8e8e8; padding: 2rem; }
+    header h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    header p { color: #a0a0b8; }
+    nav { background: #0f3460; padding: 1rem 2rem; display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    nav a { color: #e8e8e8; text-decoration: none; font-weight: 500; padding: 0.25rem 0.5rem; border-radius: 4px; }
+    nav a:hover { background: rgba(255,255,255,0.1); }
+    main { max-width: 960px; margin: 2rem auto; padding: 0 2rem; }
+    section { margin-bottom: 3rem; }
+    h2 { font-size: 1.5rem; margin-bottom: 1rem; color: #16213e; border-bottom: 2px solid #e94560; padding-bottom: 0.5rem; }
+    h3 { font-size: 1.2rem; margin: 1.5rem 0 0.75rem; color: #0f3460; }
+    p { margin-bottom: 1rem; }
+    ul { margin: 0.5rem 0 1rem 1.5rem; }
+    li { margin-bottom: 0.25rem; }
+    a { color: #e94560; }
+    code { background: #e8e8e8; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    pre { background: #16213e; color: #e8e8e8; padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 1rem 0; }
+    pre code { background: none; color: inherit; padding: 0; }
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin: 1rem 0; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1.25rem; }
+    .card h3 { margin-top: 0; }
+    .card a { text-decoration: none; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: #16213e; color: #e8e8e8; }
+    tr:nth-child(even) { background: #f0f0f5; }
+    .mermaid { text-align: center; margin: 1.5rem 0; }
+    footer { text-align: center; padding: 2rem; color: #666; border-top: 1px solid #ddd; margin-top: 3rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LightDSU v1</h1>
+    <p>Local encrypted DSU engine with versioning, audit, access control, and provenance profiles.</p>
+  </header>
+
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="specsLoader.html?spec=matrix.md">Specifications</a>
+    <a href="https://github.com/AssistOS-AI/LighDSU">GitHub</a>
+  </nav>
+
+  <main>
+    <section>
+      <h2>Overview</h2>
+      <p>LightDSU is a local library for storing, versioning, auditing, and controlling access to encrypted DSUs (Data Security Units). The model is inspired by OpenDSU: a DSU is a data unit stored as encrypted bricks, and the BrickMap is the special brick that maintains the virtual file system structure, brick references, and symmetric keys needed for reconstruction.</p>
+      <p>LightDSU preserves these concepts and removes distributed components from the core. Version 1 implements local-only storage, compact SSIs, line-oriented local anchors, signed EventSSIs, encrypted BrickMap, and virtual filesystem APIs.</p>
+    </section>
+
+    <section>
+      <h2>Architecture</h2>
+      <pre class="mermaid">
+graph TD
+    Engine[LightDSUEngine] --> DSU[MountedLightDSU]
+    Engine --> SSI[SSI Parser]
+    Engine --> Crypto[Crypto Primitives]
+    DSU --> BrickMap[BrickMap]
+    DSU --> Access[Access Control]
+    DSU --> Provenance[Provenance Profiles]
+    DSU --> Anchor[Anchor Manager]
+    BrickMap --> Bricks[Encrypted Bricks]
+    Anchor --> Events[EventSSI Chain]
+    Access --> Grants[Grant/Revoke]
+    Provenance --> Profiles[10 Profile Types]
+      </pre>
+    </section>
+
+    <section>
+      <h2>Components</h2>
+      <div class="card-grid">
+        <div class="card">
+          <h3><a href="specsLoader.html?spec=DS002-ssi-convention.md">KeySSI Family</a></h3>
+          <p><code>lkey</code> — full control, <code>rkey</code> — read-only, <code>lza</code> — zero-access verification.</p>
+        </div>
+        <div class="card">
+          <h3><a href="specsLoader.html?spec=DS005-event-types.md">EventSSI Anchor</a></h3>
+          <p>Append-only list of signed events: GENESIS, VERSION_COMMIT, GRANT, REVOKE, ACCESS_LOG, PROVENANCE, POLICY_UPDATE, KEY_EPOCH.</p>
+        </div>
+        <div class="card">
+          <h3><a href="specsLoader.html?spec=DS006-brickmap.md">BrickMap</a></h3>
+          <p>Encrypted virtual filesystem with chunk references, file keys, and manifest metadata.</p>
+        </div>
+        <div class="card">
+          <h3><a href="specsLoader.html?spec=DS007-bricks.md">Bricks</a></h3>
+          <p>AES-256-GCM encrypted, content-addressed storage units with SHA-256 hash verification.</p>
+        </div>
+        <div class="card">
+          <h3><a href="specsLoader.html?spec=DS008-access-control.md">Access Control</a></h3>
+          <p>Grant-based permissions with scope matching, ADMIN scoping, and HMAC identity binding.</p>
+        </div>
+        <div class="card">
+          <h3><a href="specsLoader.html?spec=DS011-provenance-extension.md">Provenance Profiles</a></h3>
+          <p>10 standards-compatible profiles: LIGHTDSU_MINIMAL, W3C_PROV, FHIR, GxP, RO-Crate, GA4GH, ISO 8000, OECD GLP, AI/ML.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Quick Start</h2>
+      <pre><code>const { LightDSUEngine, DefaultDidStrategy, PERMISSIONS } = require("lighdsu");
+
+const engine = await LightDSUEngine.open({
+  storageRoot: "/tmp/lightdsu-demo",
+  domain: "local",
+  currentDID: "did:example:alice",
+  didStrategy: new DefaultDidStrategy("did:example:alice")
+});
+
+const { dsu, lkeySSI, rkeySSI, lzaSSI, anchorId } = await engine.createDSU();
+await dsu.writeFile("/docs/a.txt", Buffer.from("hello"));
+const data = await dsu.readFile("/docs/a.txt");
+console.log(data.toString()); // "hello"</code></pre>
+    </section>
+
+    <section>
+      <h2>Storage Layout</h2>
+      <pre><code>&lt;storageRoot&gt;/
+  anchors/
+    &lt;anchorId&gt;.la        # Append-only event chain
+  bricks/
+    &lt;prefix&gt;/
+      &lt;brickHash&gt;.ldb    # Encrypted brick envelope
+  tmp/                    # Atomic write staging
+  locks/                  # Per-anchor lock files</code></pre>
+    </section>
+
+    <section>
+      <h2>Cryptographic Suite</h2>
+      <table>
+        <tr><th>Algorithm</th><th>Purpose</th></tr>
+        <tr><td>SHA-256</td><td>Hashing, event hashing, brick hashing, anchorId</td></tr>
+        <tr><td>HKDF-SHA256</td><td>Key derivation from lkeySecret</td></tr>
+        <tr><td>HMAC-SHA256</td><td>DID hashing, resource hashing</td></tr>
+        <tr><td>Ed25519</td><td>Anchor signing, actor signing</td></tr>
+        <tr><td>AES-256-GCM</td><td>Brick encryption, BrickMap encryption</td></tr>
+        <tr><td>Base58</td><td>SSI payload encoding</td></tr>
+      </table>
+    </section>
+
+    <section>
+      <h2>API Reference</h2>
+      <h3>Engine</h3>
+      <ul>
+        <li><code>LightDSUEngine.open(config)</code> — Create engine instance</li>
+        <li><code>engine.createDSU()</code> — Create new DSU with SSI family</li>
+        <li><code>engine.loadDSU(keySSI)</code> — Mount existing DSU</li>
+        <li><code>engine.parseSSI(serializedSSI)</code> — Parse and validate SSI</li>
+        <li><code>engine.setCurrentDID(did)</code> — Switch actor context</li>
+      </ul>
+      <h3>Filesystem</h3>
+      <ul>
+        <li><code>dsu.readFile(path)</code>, <code>dsu.writeFile(path, data)</code>, <code>dsu.appendToFile(path, data)</code></li>
+        <li><code>dsu.createFolder(path)</code>, <code>dsu.delete(path)</code>, <code>dsu.rename(src, dst)</code></li>
+        <li><code>dsu.stat(path)</code>, <code>dsu.readDir(path)</code>, <code>dsu.listFiles(path)</code>, <code>dsu.listFolders(path)</code></li>
+      </ul>
+      <h3>Batch</h3>
+      <ul>
+        <li><code>dsu.beginBatch()</code>, <code>dsu.commitBatch()</code>, <code>dsu.cancelBatch()</code>, <code>dsu.hasUncommittedChanges()</code></li>
+      </ul>
+      <h3>Access</h3>
+      <ul>
+        <li><code>dsu.grantAccess(subjectDID, scope, permissions)</code></li>
+        <li><code>dsu.revokeAccess(subjectDID, scope, permissions)</code></li>
+        <li><code>dsu.checkAccess(subjectDID, scope, permissions)</code></li>
+        <li><code>dsu.listAccess()</code></li>
+      </ul>
+      <h3>Provenance</h3>
+      <ul>
+        <li><code>dsu.appendProvenance(resource, payload)</code></li>
+        <li><code>dsu.getProvenance(query)</code></li>
+        <li><code>dsu.validateProvenance(query)</code></li>
+        <li><code>dsu.listProvenanceProfiles()</code></li>
+        <li><code>dsu.getProvenancePolicy()</code>, <code>dsu.updateProvenancePolicy(update)</code></li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Specifications</h2>
+      <p>The complete specification set is available through the <a href="specsLoader.html?spec=matrix.md">Specification Matrix</a>. Key documents:</p>
+      <ul>
+        <li><a href="specsLoader.html?spec=DS000-vision.md">DS000 — Vision</a>: Project scope and design principles</li>
+        <li><a href="specsLoader.html?spec=DS001-coding-style.md">DS001 — Coding Style</a>: Conventions and module structure</li>
+        <li><a href="specsLoader.html?spec=DS010-api-public.md">DS010 — Public API</a>: Complete API specification</li>
+        <li><a href="specsLoader.html?spec=DS011-provenance-extension.md">DS011 — Provenance Extension</a>: Profile-based provenance</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Testing</h2>
+      <p>Run all tests with:</p>
+      <pre><code>npm test</code></pre>
+      <p>The test suite covers 55 tests across core functionality, access control, provenance profiles, strict validation, concurrent commit rebasing, security tamper detection, and retention-window garbage collection.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>LightDSU v1 &mdash; <a href="https://github.com/AssistOS-AI/LighDSU">GitHub</a> &mdash; MIT License</p>
+  </footer>
+</body>
+</html>
